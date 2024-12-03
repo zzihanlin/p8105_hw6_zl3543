@@ -1,0 +1,332 @@
+---
+title: "p8105_hw6_zl3543"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(rnoaa)
+library(tidyr)
+library(purrr)
+library(readr)
+library(modelr)
+```
+
+### Problem 1
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+The dataset contains daily weather measurements for Central Park, NYC, in 2017, including precipitation (PRCP), minimum temperature (TMIN), and maximum temperature (TMAX). Temperatures are converted from tenths of a degree Celsius to Celsius for better interpretability.
+```{r}
+set.seed(123)  # Set seed for reproducibility
+
+# Perform bootstrap sampling
+bootstrap_results <- 
+  replicate(
+    5000, 
+    {
+      # Sample with replacement
+      sample_data <- weather_df %>% sample_frac(replace = TRUE)
+      
+      # Fit a linear model
+      model <- lm(tmax ~ tmin, data = sample_data)
+      
+      # Extract R-squared using broom::glance
+      r_squared <- glance(model)$r.squared
+      
+      # Extract coefficients and calculate log(beta0 * beta1)
+      coefs <- tidy(model)
+      log_beta_product <- log(coefs$estimate[1] * coefs$estimate[2])
+      
+      # Return the results as a named vector
+      c(r_squared = r_squared, log_beta_product = log_beta_product)
+    },
+    simplify = TRUE
+  )
+
+# Convert to a tidy data frame for easier handling
+bootstrap_df <- as.data.frame(t(bootstrap_results)) %>%
+  setNames(c("r_squared", "log_beta_product"))
+
+head(bootstrap_df)
+```
+These results underline the stability and reliability of the regression model in capturing the relationship between minimum and maximum temperatures in the 2017 Central Park weather data. The high R-squared values confirm the strength of the linear relationship, while the log(beta0 * beta1) values offer a consistent view of the combined coefficient effects.
+```{r}
+# Plot distribution of r_squared
+ggplot(bootstrap_df, aes(x = r_squared)) +
+  geom_histogram(binwidth = 0.01, fill = "blue", alpha = 0.7) +
+  labs(title = "Distribution of R-squared",
+       x = "R-squared",
+       y = "Frequency") +
+  theme_minimal()
+```
+The histogram reinforces the reliability of using minimum temperature as a predictor for maximum temperature, as the R-squared values are consistently high across the resampled datasets. This strong linear relationship provides confidence in the model's predictive capacity and inferences based on it. Most R-squared values fall between 0.90 and 0.93, indicating that the minimum temperature (tmin) is a very strong predictor of the maximum temperature (tmax) in the data. This is expected given the strong physical relationship between these variables in weather patterns. The distribution is relatively symmetric and concentrated, with a peak around 0.91. This suggests that the variability in R-squared values across bootstrap samples is minimal, further supporting the robustness of the relationship. 
+```{r}
+# Plot distribution of log(beta0 * beta1)
+ggplot(bootstrap_df, aes(x = log_beta_product)) +
+  geom_histogram(binwidth = 0.1, fill = "green", alpha = 0.7) +
+  labs(title = "Distribution of log(beta0 * beta1)",
+       x = "log(beta0 * beta1)",
+       y = "Frequency") +
+  theme_minimal()
+```
+The narrow and symmetric distribution of log(β₀ * β₁) demonstrates the reliability and robustness of the linear model fitted to the bootstrap samples. This consistency highlights the strong linear dependence between minimum and maximum temperatures, with little variability in the parameter interactions across resampled datasets. The results strengthen confidence in using this model to describe the relationship between tmin and tmax.
+
+```{r}
+# Calculate 95% confidence intervals
+ci_r_squared <- quantile(bootstrap_df$r_squared, c(0.025, 0.975))
+ci_log_beta_product <- quantile(bootstrap_df$log_beta_product, c(0.025, 0.975))
+
+# Print the results
+cat("95% Confidence Interval for R-squared: [", ci_r_squared[1], ", ", ci_r_squared[2], "]\n")
+cat("95% Confidence Interval for log(beta0 * beta1): [", ci_log_beta_product[1], ", ", ci_log_beta_product[2], "]\n")
+```
+The 95% confidence intervals were calculated using the 2.5th and 97.5th percentiles of the bootstrap distributions. From the results, we find that The confidence intervals for R-squared and log(beta0 * beta1) are relatively narrow, indicating high precision in the estimates obtained from the bootstrap samples. The results confirm that minimum temperature is a strong predictor of maximum temperature, and the regression model is reliable and stable. These findings underscore the predictive power of the linear relationship and suggest that any additional predictors may have minimal contribution to improving the model's explanatory capacity.
+
+### Problem 2
+
+```{r}
+# Load the dataset
+homicides <- read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv")
+
+# Inspect problematic victim_age entries before coercion
+non_numeric_ages <- homicides %>%
+  filter(!is.na(victim_age) & is.na(as.numeric(victim_age))) %>%
+  select(victim_age) %>%
+  distinct()
+
+# Clean and process the data
+cleaned_homicides <- homicides %>%
+  # Create city_state variable
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    # Identify and remove non-numeric entries in victim_age
+    victim_age = ifelse(grepl("^[0-9]+$", victim_age), as.numeric(victim_age), NA),  # Keep only numeric ages
+    # Create a binary variable indicating if the homicide is solved
+    solved = ifelse(disposition %in% c("Closed by arrest", "Closed without arrest"), 1, 0)
+  ) %>%
+  # Omit specific cities and limit to victims of race white or black
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+    victim_race %in% c("White", "Black"),
+    !is.na(victim_age)  # Ensure victim_age is not missing
+  )
+
+# Filter data for Baltimore, MD
+baltimore_data <- cleaned_homicides %>%
+  filter(city_state == "Baltimore, MD")
+
+# Fit a logistic regression model
+baltimore_glm <- glm(
+  solved ~ victim_age + victim_sex + victim_race,  # Predictors
+  family = binomial(link = "logit"),              # Logistic regression
+  data = baltimore_data                           # Data
+)
+
+# Save the logistic regression model to a file
+saveRDS(baltimore_glm, file = "/Users/suwa/Desktop/p8105_hw6_zl3543/data/baltimore_glm.rds")
+
+# Summarize the results using broom::tidy
+baltimore_tidy <- tidy(baltimore_glm, conf.int = TRUE, exponentiate = TRUE)
+
+# Extract the adjusted odds ratio and confidence intervals for male vs female
+sex_odds_ratio <- baltimore_tidy %>%
+  filter(term == "victim_sexMale") %>%
+  select(term, estimate, conf.low, conf.high)
+
+# Print the results
+print(sex_odds_ratio)
+```
+The estimate for "victim_sexMale" is approximately 0.3547, with a 95% confidence interval ranging from 0.2673 to 0.4679. This indicates that, when holding victim age and race constant, male victims are 65% less likely to have their homicide solved compared to female victims.
+```{r}
+# Group by city_state and fit logistic regression models for each city
+city_glm_results <- cleaned_homicides %>%
+  group_by(city_state) %>%
+  nest() %>%  # Nest data for each city
+  mutate(
+    glm_model = map(data, ~ glm(solved ~ victim_sex + victim_age + victim_race, 
+                                family = binomial(), data = .x)),  # Fit glm for each city
+    tidy_model = map(glm_model, broom::tidy)  # Tidy each glm model output
+  ) %>%
+  unnest(tidy_model) %>%  # Unnest the tidy model results
+  filter(term == "victim_sexMale") %>%  # Filter for the term representing male victims
+  mutate(
+    OR = exp(estimate),  # Calculate odds ratio
+    conf.low = exp(estimate - 1.96 * std.error),  # Lower bound of 95% CI
+    conf.high = exp(estimate + 1.96 * std.error)  # Upper bound of 95% CI
+  ) %>%
+  select(city_state, OR, conf.low, conf.high)  # Select relevant columns
+
+# Display results
+city_glm_results
+```
+The table summarizes the adjusted odds ratios (ORs) and their 95% confidence intervals (CIs) for solving homicides when comparing male victims to female victims, across 47 U.S. cities. The width of the confidence intervals varies by city, reflecting differences in the sample sizes and variability within the data. Cities with narrower CIs (e.g., Baltimore, MD) suggest more precise estimates due to larger datasets or more consistent patterns, while broader CIs (e.g., Albuquerque, NM) indicate greater uncertainty. Most cities show ORs below 1, suggesting that male victims are generally less likely to have their homicide cases solved compared to female victims. This pattern aligns with findings that male victims may be more likely to be involved in homicides with less community cooperation or more complex investigative circumstances. 
+```{r}
+# Order cities by estimated OR
+city_glm_results <- city_glm_results %>%
+  arrange(OR) %>%
+  mutate(city_state = factor(city_state, levels = city_state))  # Reorder factor levels
+
+# Create the plot
+or_plot <- ggplot(city_glm_results, aes(x = city_state, y = OR)) +
+  geom_point(size = 2, color = "blue") +  # Plot points for OR estimates
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2, color = "blue") +  # Add error bars for CIs
+  coord_flip() +  # Flip coordinates for better readability
+  labs(
+    title = "Estimated Odds Ratios for Solving Homicides by City",
+    x = "City, State",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 8),  # Adjust city labels for readability
+    plot.title = element_text(hjust = 0.5)  # Center the title
+  )
+
+# Display the plot
+print(or_plot)
+```
+This plot visualizes the estimated odds ratios (ORs) for solving homicides comparing male victims to female victims across various U.S. cities. Cities such as Baltimore, MD, Atlanta, GA, and Albuquerque, NM have ORs below 1, suggesting that homicides involving male victims are less likely to be solved compared to female victims, keeping other factors constant. Many cities have ORs near 1, indicating no significant difference in the likelihood of solving homicides based on the victim's sex. Some cities, such as Washington, DC and Tampa, FL, have ORs above 1, implying that homicides involving male victims may be more likely to be solved compared to female victims. 
+
+This analysis reveals that the likelihood of solving homicides varies widely across cities when comparing male to female victims. While some cities show a significant sex-based difference, others do not. The wide variation in confidence intervals highlights the importance of city-specific analyses and suggests that future studies should consider additional variables, such as resource allocation and case characteristics, to better understand these differences.
+
+
+### Problem 3
+```{r}
+# Load the dataset
+birthweight <- read.csv("/Users/suwa/Desktop/p8105_hw6_zl3543/data/birthweight.csv")
+
+# View the structure of the data
+str(birthweight)
+
+# Clean the data
+# Inspect the unique values in `frace` and `mrace`
+unique(birthweight$frace)  # Check the values present in `frace`
+unique(birthweight$mrace)  # Check the values present in `mrace`
+
+# Fix the `mutate` step with correct labels
+birthweight_clean <- birthweight %>%
+  mutate(
+    babysex = factor(babysex, labels = c("Male", "Female")),  # Baby's sex
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    malform = factor(malform, labels = c("Absent", "Present")),  # Malformations
+    parity = as.numeric(parity),  # Convert parity to numeric
+    smoken = as.numeric(smoken)   # Average cigarettes smoked per day
+  )
+
+# Check for missing data
+summary(birthweight_clean)
+```
+
+The dataset is well-structured for regression analysis, with some considerations for cleaning extreme or missing values. Key predictors of birth weight likely include maternal health and gestational factors, while socioeconomic and paternal attributes might provide additional explanatory power. Categorical variables (e.g., frace, mrace, malform) provide opportunities to examine demographic disparities.
+
+```{r}
+# Propose a regression model
+# Hypothesis-driven variables: gestational age, mother's weight gain, mother's height, smoking, and malformations
+
+# Fit a linear regression model for birthweight
+birthweight_model <- lm(
+  bwt ~ gaweeks + wtgain + mheight + smoken + malform + babysex + momage,
+  data = birthweight_clean
+)
+
+# Summarize the model to inspect results
+summary(birthweight_model)
+```
+
+This linear regression model aims to predict birthweight (bwt) using seven predictors: gestational age (gaweeks), maternal weight gain during pregnancy (wtgain), maternal height (mheight), smoking during pregnancy (smoken), presence of malformations (malform), baby’s sex (babysex), and mother’s age (momage).
+
+```{r}
+# Create residuals and fitted values for diagnostic plots
+# Add predictions and residuals
+birthweight_clean <- birthweight_clean %>%
+  add_predictions(birthweight_model, var = "predicted_bwt") %>%
+  add_residuals(birthweight_model, var = "residuals_bwt")
+
+# Plot residuals vs fitted values
+ggplot(birthweight_clean, aes(x = predicted_bwt, y = residuals_bwt)) +
+  geom_point(alpha = 0.5, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals vs Fitted Values for Birthweight Model",
+    x = "Fitted Values (Predicted Birthweight)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# Interpret the model and diagnostics
+# Check R-squared and coefficients
+tidy(birthweight_model)
+
+# Confidence intervals for the coefficients
+confint(birthweight_model)
+```
+This model provides a strong foundation for understanding the relationships between maternal factors and birthweight. Here is the process: 1. Data Cleaning and Preprocessing;2. Variable Selection; 3. Model Specification; 4. Fitting the Model; 5. Model Diagnostics; 6. Interpretation and Validation. 
+
+```{r}
+# Define the three models
+# Model 1: Proposed model
+model_1 <- function(data) {
+  lm(bwt ~ gaweeks + wtgain + mheight + smoken + malform + babysex + momage, data = data)
+}
+
+# Model 2: Length at birth and gestational age
+model_2 <- function(data) {
+  lm(bwt ~ blength + gaweeks, data = data)
+}
+
+# Model 3: Head circumference, length, sex, and interactions
+model_3 <- function(data) {
+  lm(bwt ~ bhead * blength * babysex, data = data)
+}
+
+# Set up Monte Carlo cross-validation
+set.seed(123)  # For reproducibility
+cv_splits <- crossv_mc(birthweight_clean, n = 100)
+
+# Fit the models and calculate prediction errors
+calculate_mse <- function(model_func, splits) {
+  splits %>%
+    mutate(
+      model = map(train, model_func),  # Fit the model to the training set
+      predictions = map2(model, test, ~ predict(.x, newdata = .y)),  # Predict on the test set
+      mse = map2_dbl(predictions, test, ~ mean((.x - .y$bwt)^2))  # Calculate MSE
+    ) %>%
+    summarize(mean_mse = mean(mse)) %>%  # Average MSE across splits
+    pull(mean_mse)
+}
+
+# Compare models
+mse_model_1 <- calculate_mse(model_1, cv_splits)
+mse_model_2 <- calculate_mse(model_2, cv_splits)
+mse_model_3 <- calculate_mse(model_3, cv_splits)
+
+# Combine results
+model_comparison <- tibble(
+  Model = c("Proposed Model", "Length and Gestational Age", "Head Circumference and Interactions"),
+  MSE = c(mse_model_1, mse_model_2, mse_model_3)
+)
+
+# Display results
+model_comparison %>%
+  arrange(MSE) %>%
+  knitr::kable(caption = "Cross-Validated Prediction Errors for Models")
+```
